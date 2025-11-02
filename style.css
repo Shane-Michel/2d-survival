@@ -26,9 +26,13 @@
     .btn:hover{border-color:#334155}
     .btn.primary{background:linear-gradient(180deg,#0f172a,#0b1322);border-color:#334155}
     .btn.warn{border-color:#7f1d1d;background:#1f2937;color:#fecaca}
+    .btn.block{width:100%;justify-content:center;text-align:center}
     .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;min-height:0}
     .small{font-size:12px;color:#9ca3af}
     .title{font-weight:700;letter-spacing:.3px}
     .kbd{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;background:#0b1322;border:1px solid #243244;padding:1px 6px;border-radius:6px;font-size:12px}
     .log{height:120px;overflow:auto;font-size:12px;background:#0b1322;border:1px solid #243244;border-radius:12px;padding:8px;white-space:pre-wrap}
+    .guide{margin-top:6px;font-size:13px;line-height:1.4}
+    .guide ol{padding-left:18px;margin:0}
+    .guide li{margin-bottom:6px}
   @media (max-width: 900px){.wrap{grid-template-columns:1fr;grid-template-rows:1fr auto}.sidebar{height:45vh}}
