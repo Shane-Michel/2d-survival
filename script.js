@@ -85,6 +85,14 @@
       hutCapacity:6,
     };
 
+    const SERVANT_ROLES = [
+      {id:'lumberjack', name:'Lumberjack', description:'Chops nearby trees for wood.'},
+      {id:'miner', name:'Miner', description:'Mines stone from rocky outcrops.'},
+      {id:'farmer', name:'Farmer', description:'Plants seeds and harvests crops.'},
+    ];
+    const SERVANT_ROLE_MAP = {};
+    SERVANT_ROLES.forEach(role=>{ SERVANT_ROLE_MAP[role.id] = role; });
+
     const UI = {
       modeLabel: document.getElementById('modeLabel'),
       toolLabel: document.getElementById('toolLabel'),
@@ -209,7 +217,7 @@
       const servant = {
         id: state.nextServantId++,
         name,
-        job:'gather',
+        job:SERVANT_ROLES[0].id,
         hunger:SERVANT_CONSTANTS.maxNeed,
         thirst:SERVANT_CONSTANTS.maxNeed,
         shelter:SERVANT_CONSTANTS.maxNeed,
@@ -346,7 +354,9 @@
           servant.y = state.player.y;
         }
 
-        servant.job = 'gather';
+        if(!SERVANT_ROLE_MAP[servant.job]){
+          servant.job = SERVANT_ROLES[0].id;
+        }
 
         if(servant.currentTask){
           handleServantTask(servant, dt);
@@ -402,17 +412,34 @@
         task.timer -= dt;
         if(task.timer<=0){
           task.payload = harvestTaskResources(servant, task);
-          const drop = resolveDropoffTarget(servant, task);
-          if(drop){
-            task.dropId = drop.uid;
-            task.state = 'return';
+          if(payloadHasResources(task.payload)){
+            const drop = resolveDropoffTarget(servant, task);
+            if(drop){
+              task.dropId = drop.uid;
+              task.state = 'return';
+            }else{
+              deliverTaskPayload(servant, task, null);
+              task.dropId = null;
+              servant.currentTask = null;
+              servant.taskTimer = SERVANT_CONSTANTS.gatherIntervalMinutes;
+            }
           }else{
             deliverTaskPayload(servant, task, null);
+            task.payload = null;
+            task.dropId = null;
             servant.currentTask = null;
             servant.taskTimer = SERVANT_CONSTANTS.gatherIntervalMinutes;
           }
         }
       }else if(task.state==='return'){
+        if(!payloadHasResources(task.payload)){
+          deliverTaskPayload(servant, task, null);
+          task.payload = null;
+          task.dropId = null;
+          servant.currentTask = null;
+          servant.taskTimer = SERVANT_CONSTANTS.gatherIntervalMinutes;
+          return;
+        }
         const drop = resolveDropoffTarget(servant, task);
         if(!drop){
           deliverTaskPayload(servant, task, null);
@@ -441,6 +468,38 @@
     function pickGatherTask(servant){
       const tileX = Math.floor(servant.x / TILE);
       const tileY = Math.floor(servant.y / TILE);
+      let roleId = servant.job;
+      if(!SERVANT_ROLE_MAP[roleId]){
+        roleId = SERVANT_ROLES[0].id;
+        servant.job = roleId;
+      }
+
+      if(roleId==='lumberjack'){
+        const target = findClosestTileOfType(T.TREE, tileX, tileY);
+        if(target){
+          return {type:'tree', tx:target.x, ty:target.y, state:'travel', timer:0};
+        }
+        return null;
+      }else if(roleId==='miner'){
+        const target = findClosestTileOfType(T.ROCK, tileX, tileY);
+        if(target){
+          return {type:'rock', tx:target.x, ty:target.y, state:'travel', timer:0};
+        }
+        return null;
+      }else if(roleId==='farmer'){
+        const harvestTarget = findClosestMatureCrop(tileX, tileY);
+        if(harvestTarget){
+          return {type:'farmHarvest', tx:harvestTarget.x, ty:harvestTarget.y, state:'travel', timer:0};
+        }
+        if(state.inventory.seeds>0){
+          const plantTarget = findClosestPlantableFarmTile(tileX, tileY);
+          if(plantTarget){
+            return {type:'farmPlant', tx:plantTarget.x, ty:plantTarget.y, state:'travel', timer:0};
+          }
+        }
+        return null;
+      }
+
       const preferences = preferredResourceOrder();
       for(const type of preferences){
         const tileType = type==='tree'?T.TREE:T.ROCK;
@@ -480,6 +539,44 @@
       return best;
     }
 
+    function findClosestMatureCrop(fromX, fromY){
+      let best = null;
+      let bestDist = Infinity;
+      for(let y=0;y<MAP_H;y++){
+        for(let x=0;x<MAP_W;x++){
+          const crop = state.crops[idx(x,y)];
+          if(!crop || crop.growth<100) continue;
+          const dx = x-fromX;
+          const dy = y-fromY;
+          const dist = dx*dx + dy*dy;
+          if(dist<bestDist){
+            bestDist = dist;
+            best = {x,y};
+          }
+        }
+      }
+      return best;
+    }
+
+    function findClosestPlantableFarmTile(fromX, fromY){
+      let best = null;
+      let bestDist = Infinity;
+      for(let y=0;y<MAP_H;y++){
+        for(let x=0;x<MAP_W;x++){
+          if(getTile(x,y)!==T.TILLED) continue;
+          if(state.crops[idx(x,y)]) continue;
+          const dx = x-fromX;
+          const dy = y-fromY;
+          const dist = dx*dx + dy*dy;
+          if(dist<bestDist){
+            bestDist = dist;
+            best = {x,y};
+          }
+        }
+      }
+      return best;
+    }
+
     function tileCenter(x,y){
       return {x:x*TILE+TILE/2, y:y*TILE+TILE/2};
     }
@@ -508,7 +605,10 @@
     function harvestTaskResources(servant, task){
       let woodGain = 0;
       let stoneGain = 0;
+      let foodGain = 0;
+      let seedGain = 0;
       let resourceLabel = 'resources';
+
       if(task.type==='tree'){
         resourceLabel = 'wood';
         if(getTile(task.tx, task.ty)===T.TREE){
@@ -533,14 +633,26 @@
         if(servant.thirst < SERVANT_CONSTANTS.thirstThreshold){
           stoneGain = Math.max(0, stoneGain-1);
         }
-      }
-
-      let foodGain = 0;
-      let seedGain = 0;
-      const fields = builtCount('field');
-      if(fields>0){
-        foodGain += Math.max(1, Math.floor(fields/2));
-        seedGain += Math.max(0, Math.floor(fields/3));
+      }else if(task.type==='farmHarvest'){
+        resourceLabel = 'harvest';
+        const tileIndex = idx(task.tx, task.ty);
+        const crop = state.crops[tileIndex];
+        if(crop && crop.growth>=100){
+          state.crops[tileIndex] = null;
+          setTile(task.tx, task.ty, T.TILLED);
+          setFeature(task.tx, task.ty, null);
+          foodGain = 1;
+          seedGain = 2;
+        }
+      }else if(task.type==='farmPlant'){
+        const tileIndex = idx(task.tx, task.ty);
+        if(state.inventory.seeds>0 && getTile(task.tx, task.ty)===T.TILLED && !state.crops[tileIndex]){
+          state.inventory.seeds = Math.max(0, state.inventory.seeds-1);
+          plantCrop(task.tx, task.ty);
+          log(`${servant.name} planted a seed.`);
+          updateInventoryUI();
+        }
+        return null;
       }
 
       return {
@@ -550,6 +662,12 @@
         seeds: seedGain,
         label: resourceLabel,
       };
+    }
+
+    function payloadHasResources(payload){
+      if(!payload) return false;
+      const {wood=0, stone=0, food=0, seeds=0} = payload;
+      return wood>0 || stone>0 || food>0 || seeds>0;
     }
 
     function resolveDropoffTarget(servant, task){
@@ -564,6 +682,11 @@
     function deliverTaskPayload(servant, task, dropBuilding){
       if(!task.payload) return;
       const payload = task.payload;
+      if(!payloadHasResources(payload)){
+        task.payload = null;
+        task.dropId = null;
+        return;
+      }
       state.inventory.wood += payload.wood;
       state.inventory.stone += payload.stone;
       state.inventory.seeds += payload.seeds;
@@ -591,7 +714,8 @@
     function sanitizeServantTask(task){
       if(!task || typeof task!=='object') return null;
       const type = task.type;
-      if(type!=='tree' && type!=='rock') return null;
+      const allowedTypes = ['tree','rock','farmHarvest','farmPlant'];
+      if(!allowedTypes.includes(type)) return null;
       if(typeof task.tx!=='number' || typeof task.ty!=='number') return null;
       const allowedStates = ['travel','gather','return'];
       const state = allowedStates.includes(task.state)?task.state:'travel';
@@ -698,11 +822,12 @@
         ctx.strokeStyle = '#0f172a';
         ctx.lineWidth = 2;
         ctx.stroke();
+        const roleIcon = servant.job==='miner'?'⛏':(servant.job==='farmer'?'🌾':'🪓');
         if(servant.currentTask && servant.currentTask.state==='gather'){
           ctx.fillStyle = 'rgba(255,255,255,0.8)';
           ctx.font = '10px sans-serif';
           ctx.textAlign = 'center';
-          ctx.fillText('⛏', 0, 4);
+          ctx.fillText(roleIcon, 0, 4);
         }
         ctx.restore();
       }
@@ -933,7 +1058,42 @@
 
         const jobRow=document.createElement('div');
         jobRow.className='servant-job';
-        jobRow.innerHTML = '<div class="row"><div>Role</div><div>Gatherer</div></div>';
+        const roleRow=document.createElement('div');
+        roleRow.className='row';
+        const roleLabel=document.createElement('div');
+        roleLabel.textContent='Role';
+        const roleValue=document.createElement('div');
+        const select=document.createElement('select');
+        SERVANT_ROLES.forEach(role=>{
+          const opt=document.createElement('option');
+          opt.value = role.id;
+          opt.textContent = role.name;
+          select.appendChild(opt);
+        });
+        if(!SERVANT_ROLE_MAP[servant.job]) servant.job = SERVANT_ROLES[0].id;
+        select.value = servant.job;
+        select.addEventListener('change',e=>{
+          const newJob = e.target.value;
+          if(!SERVANT_ROLE_MAP[newJob]) return;
+          if(servant.job===newJob) return;
+          servant.job = newJob;
+          servant.currentTask = null;
+          servant.taskTimer = 0;
+          const roleName = SERVANT_ROLE_MAP[newJob]?.name || 'worker';
+          log(`${servant.name} is now a ${roleName}.`);
+          invalidateServantUI();
+        });
+        roleValue.appendChild(select);
+        roleRow.appendChild(roleLabel);
+        roleRow.appendChild(roleValue);
+        jobRow.appendChild(roleRow);
+        const roleInfo = SERVANT_ROLE_MAP[servant.job];
+        if(roleInfo && roleInfo.description){
+          const desc=document.createElement('div');
+          desc.className='small';
+          desc.textContent = roleInfo.description;
+          jobRow.appendChild(desc);
+        }
         card.appendChild(jobRow);
 
         UI.servantList.appendChild(card);
@@ -1100,7 +1260,7 @@
         state.servants = d.servants.map(s=>({
           id: s.id,
           name: s.name||'Helper',
-          job: 'gather',
+          job: SERVANT_ROLE_MAP[s.job]?s.job:SERVANT_ROLES[0].id,
           hunger: typeof s.hunger==='number'?s.hunger:SERVANT_CONSTANTS.maxNeed,
           thirst: typeof s.thirst==='number'?s.thirst:SERVANT_CONSTANTS.maxNeed,
           shelter: typeof s.shelter==='number'?s.shelter:SERVANT_CONSTANTS.maxNeed,
