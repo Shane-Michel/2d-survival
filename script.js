@@ -37,7 +37,7 @@
       player:{x:MAP_W*TILE/2, y:MAP_H*TILE/2, baseSpeed:140},
       mode:'gather',
       toolIndex:0,
-      inventory:{ wood:0, stone:0, seeds:4, food:0 },
+      inventory:{ wood:10, stone:10, seeds:10, food:10 },
       buildings:[],
       nextBuildingId:1,
       servants:[],
@@ -667,7 +667,21 @@
       else if(tool==='hand'){
         // harvest crop if grown
         const c = state.crops[idx(tx,ty)];
-        if(c && c.growth>=100){ state.crops[idx(tx,ty)]=null; setTile(tx,ty,T.TILLED); setFeature(tx,ty,null); state.inventory.food = Math.min(maxFoodStorage(), state.inventory.food+1); state.inventory.seeds+=Math.random()<0.6?1:0; log('Harvested crop: +food'); }
+        if(c && c.growth>=100){
+          state.crops[idx(tx,ty)]=null;
+          setTile(tx,ty,T.TILLED);
+          setFeature(tx,ty,null);
+          const prevFood = state.inventory.food;
+          const newFood = Math.min(maxFoodStorage(), prevFood+1);
+          state.inventory.food = newFood;
+          const foodGained = newFood - prevFood;
+          const seedsGained = foodGained * 2;
+          if(seedsGained>0) state.inventory.seeds += seedsGained;
+          const parts = [];
+          if(foodGained>0) parts.push(`+${foodGained} food`);
+          if(seedsGained>0) parts.push(`+${seedsGained} seeds`);
+          log(`Harvested crop${parts.length?`: ${parts.join(', ')}`:''}`);
+        }
       }
       updateInventoryUI();
     });
