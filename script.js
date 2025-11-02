@@ -70,6 +70,8 @@
       loadBtn: document.getElementById('loadBtn'),
       resetBtn: document.getElementById('resetBtn'),
       centerBtn: document.getElementById('centerBtn'),
+      guideBtn: document.getElementById('guideBtn'),
+      guideContent: document.getElementById('guideContent'),
     };
 
     const LOG_LIMIT = 80;
@@ -339,6 +341,16 @@
     UI.loadBtn.onclick = ()=>{ if(loadGame()) log('Game loaded'); else log('No save found'); };
     UI.resetBtn.onclick = ()=>{ genWorld(Date.now()%0x7fffffff); updateInventoryUI(); };
     UI.centerBtn.onclick = ()=> centerCamera();
+    UI.guideBtn.onclick = ()=>{
+      const hidden = UI.guideContent.hasAttribute('hidden');
+      if(hidden){
+        UI.guideContent.removeAttribute('hidden');
+        UI.guideBtn.innerHTML = '<span>Hide Guide</span>';
+      }else{
+        UI.guideContent.setAttribute('hidden','');
+        UI.guideBtn.innerHTML = '<span>Show Guide</span>';
+      }
+    };
 
     // Keyboard
     window.addEventListener('keydown',e=>{
