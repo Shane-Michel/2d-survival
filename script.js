@@ -62,17 +62,13 @@
       {id:'well', name:'Well', w:1, h:1, cost:{stone:5}},
     ];
 
-    const ServantJobs = {
-      gather:{id:'gather', label:'Gatherer'},
-      build:{id:'build', label:'Builder'},
-    };
-
     const SERVANT_CONSTANTS = {
       hungerDecayPerMinute:0.035,
       thirstDecayPerMinute:0.05,
       shelterDecayPerMinute:0.02,
       gatherIntervalMinutes:240, // every 4 hours
-      buildSpeedPerMinute:1.6,
+      gatherWorkSeconds:3,
+      moveSpeed:70,
       agePerDay:0.2,
       hungerThreshold:60,
       thirstThreshold:60,
@@ -170,27 +166,29 @@
     function initServants(){
       state.servants.length = 0;
       state.nextServantId = 1;
-      spawnServant('Adalyn', 'gather');
-      spawnServant('Brom', 'build');
+      spawnServant('Adalyn');
+      spawnServant('Brom');
       state.waterRations = 0;
       assignHousing();
       pruneDeadServants();
       invalidateServantUI();
     }
 
-    function spawnServant(name, job='gather', silent=false){
+    function spawnServant(name, silent=false){
       const servant = {
         id: state.nextServantId++,
         name,
-        job,
+        job:'gather',
         hunger:SERVANT_CONSTANTS.maxNeed,
         thirst:SERVANT_CONSTANTS.maxNeed,
         shelter:SERVANT_CONSTANTS.maxNeed,
         age:18 + Math.random()*4,
+        x: clamp(state.player.x + (Math.random()*TILE*2 - TILE), TILE/2, MAP_W*TILE - TILE/2),
+        y: clamp(state.player.y + (Math.random()*TILE*2 - TILE), TILE/2, MAP_H*TILE - TILE/2),
         taskTimer:0,
+        currentTask:null,
         homeId:null,
         alive:true,
-        lastJobMessage:0,
       };
       state.servants.push(servant);
       if(!silent) log(`Servant ${servant.name} has joined your settlement.`);
@@ -261,7 +259,7 @@
       if(Math.random() < chance){
         const babyNames = ['Cora','Eldon','Mira','Soren','Lysa','Tavin','Enid','Hale'];
         const name = babyNames[Math.floor(Math.random()*babyNames.length)] + ' Jr.';
-        const child = spawnServant(name, 'gather', true);
+        const child = spawnServant(name, true);
         child.age = 1;
         child.hunger = SERVANT_CONSTANTS.maxNeed*0.8;
         child.thirst = SERVANT_CONSTANTS.maxNeed*0.8;
@@ -312,17 +310,25 @@
           servant.shelter = Math.min(SERVANT_CONSTANTS.maxNeed, servant.shelter + 0.02*minutes);
         }
 
-        servant.taskTimer += minutes;
-        if(servant.job==='gather'){
-          const interval = SERVANT_CONSTANTS.gatherIntervalMinutes;
-          while(servant.taskTimer>=interval){
-            servant.taskTimer -= interval;
-            performGatherCycle(servant);
+        if(typeof servant.x!=='number' || typeof servant.y!=='number'){
+          servant.x = state.player.x;
+          servant.y = state.player.y;
+        }
+
+        servant.job = 'gather';
+
+        if(servant.currentTask){
+          handleServantTask(servant, dt);
+        }else{
+          servant.taskTimer = Math.max(0, servant.taskTimer - minutes);
+          if(servant.taskTimer<=0){
+            const task = pickGatherTask(servant);
+            if(task){
+              servant.currentTask = task;
+            }else{
+              servant.taskTimer = SERVANT_CONSTANTS.gatherIntervalMinutes/2;
+            }
           }
-        }else if(servant.job==='build'){
-          const rate = SERVANT_CONSTANTS.buildSpeedPerMinute;
-          advanceConstruction(rate*minutes, servant);
-          servant.taskTimer = 0;
         }
 
         if(servant.hunger===0){
@@ -343,9 +349,110 @@
       invalidateServantUI();
     }
 
-    function performGatherCycle(servant){
-      let woodGain = 2;
-      let stoneGain = 1;
+    function handleServantTask(servant, dt){
+      const task = servant.currentTask;
+      if(!task) return;
+      if(task.state==='travel'){
+        const targetPos = tileCenter(task.tx, task.ty);
+        const dx = targetPos.x - servant.x;
+        const dy = targetPos.y - servant.y;
+        const dist = Math.hypot(dx, dy);
+        const step = SERVANT_CONSTANTS.moveSpeed * dt;
+        if(dist > 1){
+          const inv = dist===0?0:1/dist;
+          const move = Math.min(dist, step);
+          servant.x += dx*inv*move;
+          servant.y += dy*inv*move;
+        }else{
+          task.state = 'gather';
+          task.timer = SERVANT_CONSTANTS.gatherWorkSeconds;
+        }
+      }else if(task.state==='gather'){
+        task.timer -= dt;
+        if(task.timer<=0){
+          completeGatherTask(servant, task);
+          servant.currentTask = null;
+          servant.taskTimer = SERVANT_CONSTANTS.gatherIntervalMinutes;
+        }
+      }
+    }
+
+    function pickGatherTask(servant){
+      const tileX = Math.floor(servant.x / TILE);
+      const tileY = Math.floor(servant.y / TILE);
+      const preferences = preferredResourceOrder();
+      for(const type of preferences){
+        const tileType = type==='tree'?T.TREE:T.ROCK;
+        const target = findClosestTileOfType(tileType, tileX, tileY);
+        if(target){
+          return {type, tx:target.x, ty:target.y, state:'travel', timer:0};
+        }
+      }
+      return null;
+    }
+
+    function preferredResourceOrder(){
+      const order = [];
+      if(state.inventory.wood <= state.inventory.stone){
+        order.push('tree', 'rock');
+      }else{
+        order.push('rock', 'tree');
+      }
+      return order;
+    }
+
+    function findClosestTileOfType(tileType, fromX, fromY){
+      let best=null;
+      let bestDist=Infinity;
+      for(let y=0;y<MAP_H;y++){
+        for(let x=0;x<MAP_W;x++){
+          if(getTile(x,y)!==tileType) continue;
+          const dx = x-fromX;
+          const dy = y-fromY;
+          const d = dx*dx + dy*dy;
+          if(d<bestDist){
+            bestDist = d;
+            best = {x,y};
+          }
+        }
+      }
+      return best;
+    }
+
+    function tileCenter(x,y){
+      return {x:x*TILE+TILE/2, y:y*TILE+TILE/2};
+    }
+
+    function completeGatherTask(servant, task){
+      let woodGain = 0;
+      let stoneGain = 0;
+      let resourceLabel = 'resources';
+      if(task.type==='tree'){
+        resourceLabel = 'wood';
+        if(getTile(task.tx, task.ty)===T.TREE){
+          setTile(task.tx, task.ty, T.GRASS);
+          setFeature(task.tx, task.ty, {timer:RESPAWN_DAYS.TREE, type:T.TREE});
+          woodGain = 2 + Math.floor(Math.random()*2);
+        }else{
+          woodGain = 1;
+        }
+        if(servant.hunger < SERVANT_CONSTANTS.hungerThreshold){
+          woodGain = Math.max(0, woodGain-1);
+        }
+      }else if(task.type==='rock'){
+        resourceLabel = 'stone';
+        if(getTile(task.tx, task.ty)===T.ROCK){
+          setTile(task.tx, task.ty, T.GRASS);
+          setFeature(task.tx, task.ty, {timer:RESPAWN_DAYS.ROCK, type:T.ROCK});
+          stoneGain = 1 + Math.floor(Math.random()*3);
+        }else{
+          stoneGain = 1;
+        }
+        if(servant.thirst < SERVANT_CONSTANTS.thirstThreshold){
+          stoneGain = Math.max(0, stoneGain-1);
+        }
+      }
+
       let foodGain = 0;
       let seedGain = 0;
       const fields = builtCount('field');
@@ -353,35 +460,30 @@
         foodGain += Math.max(1, Math.floor(fields/2));
         seedGain += Math.max(0, Math.floor(fields/3));
       }
-      if(servant.hunger < SERVANT_CONSTANTS.hungerThreshold) woodGain = Math.max(0, woodGain-1);
-      if(servant.thirst < SERVANT_CONSTANTS.thirstThreshold) stoneGain = Math.max(0, stoneGain-1);
 
       state.inventory.wood += woodGain;
       state.inventory.stone += stoneGain;
       state.inventory.seeds += seedGain;
       state.inventory.food = Math.min(maxFoodStorage(), state.inventory.food + foodGain);
-      let extras = [];
-      if(foodGain>0) extras.push(`+${foodGain} food`);
-      if(seedGain>0) extras.push(`+${seedGain} seeds`);
-      const extraStr = extras.length?`, ${extras.join(', ')}`:'';
-      log(`${servant.name} gathered resources (+${woodGain} wood, +${stoneGain} stone${extraStr}).`);
+
+      const parts = [];
+      if(woodGain>0) parts.push(`+${woodGain} wood`);
+      if(stoneGain>0) parts.push(`+${stoneGain} stone`);
+      if(foodGain>0) parts.push(`+${foodGain} food`);
+      if(seedGain>0) parts.push(`+${seedGain} seeds`);
+      const extras = parts.length?` (${parts.join(', ')})`:'';
+      log(`${servant.name} gathered ${resourceLabel}${extras}.`);
       updateInventoryUI();
     }
 
-    function advanceConstruction(progress, servant){
-      const site = state.buildings.find(b=>!b.built);
-      if(!site){
-        if(performance.now() - servant.lastJobMessage > 4000){
-          log(`${servant.name} waits for construction orders.`);
-          servant.lastJobMessage = performance.now();
-        }
-        return;
-      }
-      site.progress = (site.progress||0) + progress;
-      if(site.progress>=100){
-        finalizeBuilding(site);
-        log(`${servant.name} completed the ${Buildings.find(b=>b.id===site.id)?.name||site.id}.`);
-      }
+    function sanitizeServantTask(task){
+      if(!task || typeof task!=='object') return null;
+      const type = task.type;
+      if(type!=='tree' && type!=='rock') return null;
+      if(typeof task.tx!=='number' || typeof task.ty!=='number') return null;
+      const state = task.state==='gather' ? 'gather' : 'travel';
+      const timer = typeof task.timer==='number' ? task.timer : 0;
+      return {type, tx:Math.floor(task.tx), ty:Math.floor(task.ty), state, timer};
     }
 
     function finalizeBuilding(site){
@@ -458,6 +560,28 @@
         ctx.save();
         ctx.translate(b.x*TILE, b.y*TILE);
         drawBuilding(b);
+        ctx.restore();
+      }
+
+      // servants
+      for(const servant of state.servants){
+        if(!servant.alive) continue;
+        if(typeof servant.x!=='number' || typeof servant.y!=='number') continue;
+        ctx.save();
+        ctx.translate(servant.x, servant.y);
+        ctx.fillStyle = '#38bdf8';
+        ctx.beginPath();
+        ctx.arc(0,0,8,0,Math.PI*2);
+        ctx.fill();
+        ctx.strokeStyle = '#0f172a';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        if(servant.currentTask && servant.currentTask.state==='gather'){
+          ctx.fillStyle = 'rgba(255,255,255,0.8)';
+          ctx.font = '10px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('⛏', 0, 4);
+        }
         ctx.restore();
       }
 
@@ -582,12 +706,11 @@
       }
       if(!canAfford(proto.cost)){ log('Not enough resources'); return; }
       pay(proto.cost);
-      const building = {uid:state.nextBuildingId++, id:proto.id, x:tx, y:ty, w:proto.w, h:proto.h, rot:buildRot, built:false, progress:0};
+      const building = {uid:state.nextBuildingId++, id:proto.id, x:tx, y:ty, w:proto.w, h:proto.h, rot:buildRot, built:true, progress:100};
       state.buildings.push(building);
       for(let oy=0;oy<proto.h;oy++) for(let ox=0;ox<proto.w;ox++){ setFeature(tx+ox,ty+oy,null); }
-      log(`Planned ${proto.name}; builders will complete it.`);
-      updateInventoryUI();
-      invalidateServantUI();
+      finalizeBuilding(building);
+      log(`You built a ${proto.name}.`);
     }
 
     function hasBuildingAt(tx,ty){
@@ -664,18 +787,9 @@
         needs.appendChild(makeNeedRow('Shelter', servant.shelter));
         card.appendChild(needs);
 
-        const jobRow=document.createElement('label');
+        const jobRow=document.createElement('div');
         jobRow.className='servant-job';
-        jobRow.textContent='Job';
-        const select=document.createElement('select');
-        for(const job of Object.values(ServantJobs)){
-          const opt=document.createElement('option');
-          opt.value=job.id; opt.textContent=job.label;
-          if(servant.job===job.id) opt.selected=true;
-          select.appendChild(opt);
-        }
-        select.onchange=()=>{ servant.job = select.value; servant.taskTimer=0; invalidateServantUI(); log(`${servant.name} is now a ${ServantJobs[select.value]?.label||select.value}.`); };
-        jobRow.appendChild(select);
+        jobRow.innerHTML = '<div class="row"><div>Role</div><div>Gatherer</div></div>';
         card.appendChild(jobRow);
 
         UI.servantList.appendChild(card);
@@ -835,15 +949,17 @@
         state.servants = d.servants.map(s=>({
           id: s.id,
           name: s.name||'Helper',
-          job: s.job||'gather',
+          job: 'gather',
           hunger: typeof s.hunger==='number'?s.hunger:SERVANT_CONSTANTS.maxNeed,
           thirst: typeof s.thirst==='number'?s.thirst:SERVANT_CONSTANTS.maxNeed,
           shelter: typeof s.shelter==='number'?s.shelter:SERVANT_CONSTANTS.maxNeed,
           age: typeof s.age==='number'?s.age:20,
-          taskTimer: s.taskTimer||0,
+          taskTimer: Math.max(0, typeof s.taskTimer==='number'?s.taskTimer:0),
+          x: clamp(typeof s.x==='number'?s.x:state.player.x, TILE/2, MAP_W*TILE - TILE/2),
+          y: clamp(typeof s.y==='number'?s.y:state.player.y, TILE/2, MAP_H*TILE - TILE/2),
+          currentTask: sanitizeServantTask(s.currentTask),
           homeId: s.homeId||null,
           alive: s.alive!==false,
-          lastJobMessage:0,
         }));
         state.nextServantId = d.nextServantId || (Math.max(0,...state.servants.map(s=>s.id||0))+1);
       }else{

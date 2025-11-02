@@ -28,9 +28,8 @@
     .servant-needs{display:flex;flex-direction:column;gap:4px}
     .need-bar{height:6px;border-radius:999px;background:#1f2937;overflow:hidden}
     .need-bar>div{height:100%;background:linear-gradient(90deg,#4ade80,#22d3ee)}
-    .servant-job{display:flex;align-items:center;gap:6px;font-size:11px}
-    .servant-job select{background:#0b1a2f;border:1px solid #243244;color:#e5e7eb;border-radius:6px;padding:2px 6px;font-size:11px}
-    .servant-job select:focus{outline:1px solid var(--accent)}
+    .servant-job{font-size:11px}
+    .servant-job .row{margin:0}
     .btn{all:unset;display:inline-flex;align-items:center;gap:8px;padding:8px 10px;border-radius:10px;border:1px solid #243244;background:#0b1322;cursor:pointer}
     .btn:hover{border-color:#334155}
     .btn.primary{background:linear-gradient(180deg,#0f172a,#0b1322);border-color:#334155}
