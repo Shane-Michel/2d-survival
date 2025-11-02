@@ -15,7 +15,7 @@
     };
     const TILE_COLORS = {
       [T.GRASS]: '#1b4d2b',
-      [T.TREE] : '#134e2a',
+      [T.TREE] : '#082814ff',
       [T.ROCK] : '#4b5563',
       [T.WATER]: '#1d4ed8',
       [T.TILLED]:'#7c3f18',
