@@ -22,6 +22,15 @@
     .inv{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
     .card{border:1px solid #243244;border-radius:12px;padding:10px}
     .row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:4px 0}
+    .servants{display:flex;flex-direction:column;gap:8px;font-size:12px;max-height:180px;overflow:auto}
+    .servant-card{border:1px solid #1f2937;border-radius:10px;padding:8px;display:flex;flex-direction:column;gap:6px;background:#0b1322}
+    .servant-header{display:flex;align-items:center;justify-content:space-between;gap:6px;font-weight:600}
+    .servant-needs{display:flex;flex-direction:column;gap:4px}
+    .need-bar{height:6px;border-radius:999px;background:#1f2937;overflow:hidden}
+    .need-bar>div{height:100%;background:linear-gradient(90deg,#4ade80,#22d3ee)}
+    .servant-job{display:flex;align-items:center;gap:6px;font-size:11px}
+    .servant-job select{background:#0b1a2f;border:1px solid #243244;color:#e5e7eb;border-radius:6px;padding:2px 6px;font-size:11px}
+    .servant-job select:focus{outline:1px solid var(--accent)}
     .btn{all:unset;display:inline-flex;align-items:center;gap:8px;padding:8px 10px;border-radius:10px;border:1px solid #243244;background:#0b1322;cursor:pointer}
     .btn:hover{border-color:#334155}
     .btn.primary{background:linear-gradient(180deg,#0f172a,#0b1322);border-color:#334155}
