@@ -58,9 +58,13 @@
       {id:'hut', name:'Hut', w:2, h:2, cost:{wood:10, stone:5}},
       {id:'field', name:'Field', w:2, h:2, cost:{wood:2}},
       {id:'road', name:'Road', w:1, h:1, cost:{stone:1}},
-      {id:'silo', name:'Silo', w:2, h:2, cost:{wood:6, stone:6}},
+      {id:'silo', name:'Silo', w:2, h:2, cost:{wood:6, stone:6}, dropOff:true},
       {id:'well', name:'Well', w:1, h:1, cost:{stone:5}},
     ];
+
+    const BUILDING_DEFS = {};
+    Buildings.forEach(proto=>{ BUILDING_DEFS[proto.id] = proto; });
+    BUILDING_DEFS.towncenter = {id:'towncenter', name:'Town Center', w:3, h:3, cost:{}, dropOff:true};
 
     const SERVANT_CONSTANTS = {
       hungerDecayPerMinute:0.035,
@@ -121,6 +125,8 @@
       state.world = new Array(MAP_W*MAP_H).fill(T.GRASS);
       state.features = new Array(MAP_W*MAP_H).fill(null); // respawn timers etc.
       state.crops = new Array(MAP_W*MAP_H).fill(null);
+      state.buildings = [];
+      state.nextBuildingId = 1;
       logEntries.length = 0;
       UI.log.textContent = '';
 
@@ -144,6 +150,7 @@
       const sx=Math.floor(MAP_W/2), sy=Math.floor(MAP_H/2);
       for(let y=-3;y<=3;y++)for(let x=-3;x<=3;x++) if(inBounds(sx+x,sy+y)) setTile(sx+x,sy+y,T.GRASS);
       state.player.x = sx*TILE+TILE/2; state.player.y=sy*TILE+TILE/2;
+      placeTownCenter(sx, sy);
       log('New world generated. Welcome!');
       initServants();
     }
@@ -158,6 +165,30 @@
       for(let y=-r;y<=r;y++)for(let x=-r;x<=r;x++){
         if(x*x+y*y<=r*r&&inBounds(cx+x,cy+y)) setTile(cx+x,cy+y,type);
       }
+    }
+
+    function placeTownCenter(centerTileX, centerTileY){
+      const proto = BUILDING_DEFS.towncenter;
+      const startX = centerTileX - Math.floor(proto.w/2);
+      const startY = centerTileY - Math.floor(proto.h/2);
+      const building = {
+        uid: state.nextBuildingId++,
+        id: proto.id,
+        x: startX,
+        y: startY,
+        w: proto.w,
+        h: proto.h,
+        rot: 0,
+        built: true,
+        progress: 100,
+        dropOff: true,
+      };
+      for(let oy=0;oy<building.h;oy++){
+        for(let ox=0;ox<building.w;ox++){
+          if(inBounds(building.x+ox, building.y+oy)) setFeature(building.x+ox, building.y+oy, null);
+        }
+      }
+      state.buildings.push(building);
     }
 
     // ===================
@@ -370,7 +401,37 @@
       }else if(task.state==='gather'){
         task.timer -= dt;
         if(task.timer<=0){
-          completeGatherTask(servant, task);
+          task.payload = harvestTaskResources(servant, task);
+          const drop = resolveDropoffTarget(servant, task);
+          if(drop){
+            task.dropId = drop.uid;
+            task.state = 'return';
+          }else{
+            deliverTaskPayload(servant, task, null);
+            servant.currentTask = null;
+            servant.taskTimer = SERVANT_CONSTANTS.gatherIntervalMinutes;
+          }
+        }
+      }else if(task.state==='return'){
+        const drop = resolveDropoffTarget(servant, task);
+        if(!drop){
+          deliverTaskPayload(servant, task, null);
+          servant.currentTask = null;
+          servant.taskTimer = SERVANT_CONSTANTS.gatherIntervalMinutes;
+          return;
+        }
+        const targetPos = buildingCenter(drop);
+        const dx = targetPos.x - servant.x;
+        const dy = targetPos.y - servant.y;
+        const dist = Math.hypot(dx, dy);
+        const step = SERVANT_CONSTANTS.moveSpeed * dt;
+        if(dist > 1){
+          const inv = dist===0?0:1/dist;
+          const move = Math.min(dist, step);
+          servant.x += dx*inv*move;
+          servant.y += dy*inv*move;
+        }else{
+          deliverTaskPayload(servant, task, drop);
           servant.currentTask = null;
           servant.taskTimer = SERVANT_CONSTANTS.gatherIntervalMinutes;
         }
@@ -423,7 +484,28 @@
       return {x:x*TILE+TILE/2, y:y*TILE+TILE/2};
     }
 
-    function completeGatherTask(servant, task){
+    function buildingCenter(b){
+      return {x:(b.x + b.w/2)*TILE, y:(b.y + b.h/2)*TILE};
+    }
+
+    function findNearestDropoff(worldX, worldY){
+      let best=null;
+      let bestDist=Infinity;
+      for(const b of state.buildings){
+        if(!b || !b.built || !b.dropOff) continue;
+        const center = buildingCenter(b);
+        const dx = center.x - worldX;
+        const dy = center.y - worldY;
+        const dist = dx*dx + dy*dy;
+        if(dist<bestDist){
+          bestDist = dist;
+          best = b;
+        }
+      }
+      return best;
+    }
+
+    function harvestTaskResources(servant, task){
       let woodGain = 0;
       let stoneGain = 0;
       let resourceLabel = 'resources';
@@ -461,19 +543,49 @@
         seedGain += Math.max(0, Math.floor(fields/3));
       }
 
-      state.inventory.wood += woodGain;
-      state.inventory.stone += stoneGain;
-      state.inventory.seeds += seedGain;
-      state.inventory.food = Math.min(maxFoodStorage(), state.inventory.food + foodGain);
+      return {
+        wood: woodGain,
+        stone: stoneGain,
+        food: foodGain,
+        seeds: seedGain,
+        label: resourceLabel,
+      };
+    }
+
+    function resolveDropoffTarget(servant, task){
+      const preferredId = task.dropId;
+      if(typeof preferredId==='number'){
+        const existing = state.buildings.find(b=>b.uid===preferredId && b.built && b.dropOff);
+        if(existing) return existing;
+      }
+      return findNearestDropoff(servant.x, servant.y);
+    }
+
+    function deliverTaskPayload(servant, task, dropBuilding){
+      if(!task.payload) return;
+      const payload = task.payload;
+      state.inventory.wood += payload.wood;
+      state.inventory.stone += payload.stone;
+      state.inventory.seeds += payload.seeds;
+
+      const beforeFood = state.inventory.food;
+      const maxFood = maxFoodStorage();
+      const potentialFood = beforeFood + payload.food;
+      state.inventory.food = Math.min(maxFood, potentialFood);
+      const foodAdded = state.inventory.food - beforeFood;
 
       const parts = [];
-      if(woodGain>0) parts.push(`+${woodGain} wood`);
-      if(stoneGain>0) parts.push(`+${stoneGain} stone`);
-      if(foodGain>0) parts.push(`+${foodGain} food`);
-      if(seedGain>0) parts.push(`+${seedGain} seeds`);
+      if(payload.wood>0) parts.push(`+${payload.wood} wood`);
+      if(payload.stone>0) parts.push(`+${payload.stone} stone`);
+      if(foodAdded>0) parts.push(`+${foodAdded} food`);
+      if(payload.seeds>0) parts.push(`+${payload.seeds} seeds`);
       const extras = parts.length?` (${parts.join(', ')})`:'';
-      log(`${servant.name} gathered ${resourceLabel}${extras}.`);
+
+      const dropName = dropBuilding ? (BUILDING_DEFS[dropBuilding.id]?.name || 'structure') : 'storage';
+      log(`${servant.name} delivered ${payload.label}${extras} to the ${dropName}.`);
       updateInventoryUI();
+      task.payload = null;
+      task.dropId = null;
     }
 
     function sanitizeServantTask(task){
@@ -481,9 +593,19 @@
       const type = task.type;
       if(type!=='tree' && type!=='rock') return null;
       if(typeof task.tx!=='number' || typeof task.ty!=='number') return null;
-      const state = task.state==='gather' ? 'gather' : 'travel';
+      const allowedStates = ['travel','gather','return'];
+      const state = allowedStates.includes(task.state)?task.state:'travel';
       const timer = typeof task.timer==='number' ? task.timer : 0;
-      return {type, tx:Math.floor(task.tx), ty:Math.floor(task.ty), state, timer};
+      const dropId = typeof task.dropId==='number'?task.dropId:null;
+      let payload = null;
+      if(task.payload && typeof task.payload==='object'){
+        const w = Math.max(0, Number(task.payload.wood)||0);
+        const s = Math.max(0, Number(task.payload.stone)||0);
+        const f = Math.max(0, Number(task.payload.food)||0);
+        const seeds = Math.max(0, Number(task.payload.seeds)||0);
+        payload = {wood:w, stone:s, food:f, seeds:seeds, label: typeof task.payload.label==='string'?task.payload.label:'resources'};
+      }
+      return {type, tx:Math.floor(task.tx), ty:Math.floor(task.ty), state, timer, dropId, payload};
     }
 
     function finalizeBuilding(site){
@@ -602,6 +724,14 @@
       ctx.globalAlpha = 0.6 + 0.4*progress;
       ctx.fillStyle = '#9ca3af';
       switch(b.id){
+        case 'towncenter':
+          ctx.fillStyle = '#b45309';
+          ctx.fillRect(0,0,b.w*TILE,b.h*TILE);
+          ctx.fillStyle = '#78350f';
+          ctx.fillRect(TILE*0.2, TILE*0.2, b.w*TILE-TILE*0.4, b.h*TILE-TILE*0.4);
+          ctx.fillStyle = '#fde68a';
+          ctx.fillRect(b.w*TILE/2 - TILE*0.4, b.h*TILE/2 - TILE*0.7, TILE*0.8, TILE*1.2);
+          break;
         case 'hut':
           ctx.fillStyle = '#9b6b43';
           ctx.fillRect(0,0,b.w*TILE,b.h*TILE);
@@ -720,7 +850,7 @@
       }
       if(!canAfford(proto.cost)){ log('Not enough resources'); return; }
       pay(proto.cost);
-      const building = {uid:state.nextBuildingId++, id:proto.id, x:tx, y:ty, w:proto.w, h:proto.h, rot:buildRot, built:true, progress:100};
+      const building = {uid:state.nextBuildingId++, id:proto.id, x:tx, y:ty, w:proto.w, h:proto.h, rot:buildRot, built:true, progress:100, dropOff:!!proto.dropOff};
       state.buildings.push(building);
       for(let oy=0;oy<proto.h;oy++) for(let ox=0;ox<proto.w;ox++){ setFeature(tx+ox,ty+oy,null); }
       finalizeBuilding(building);
@@ -954,8 +1084,15 @@
         if(!copy.uid) copy.uid = state.nextBuildingId++;
         if(typeof copy.built!=='boolean') copy.built = true;
         copy.progress = copy.built ? 100 : (copy.progress||0);
+        const def = BUILDING_DEFS[copy.id];
+        copy.dropOff = !!(def && def.dropOff);
         return copy;
       }) : [];
+
+      if(!state.buildings.some(b=>b.id==='towncenter')){
+        const sx=Math.floor(MAP_W/2), sy=Math.floor(MAP_H/2);
+        placeTownCenter(sx, sy);
+      }
 
       state.inventory.food = Math.min(maxFoodStorage(), state.inventory.food||0);
 
