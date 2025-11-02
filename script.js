@@ -34,11 +34,16 @@
     const state = {
       day:1, time:6*60, // minutes since midnight
       world:[], features:[], crops:[], // arrays per tile
-      player:{x:MAP_W*TILE/2, y:MAP_H*TILE/2, speed:140},
+      player:{x:MAP_W*TILE/2, y:MAP_H*TILE/2, baseSpeed:140},
       mode:'gather',
       toolIndex:0,
       inventory:{ wood:0, stone:0, seeds:4, food:0 },
       buildings:[],
+      nextBuildingId:1,
+      servants:[],
+      nextServantId:1,
+      waterRations:0,
+      servantUiTimer:0,
     };
 
     const Tools=[
@@ -57,6 +62,29 @@
       {id:'well', name:'Well', w:1, h:1, cost:{stone:5}},
     ];
 
+    const ServantJobs = {
+      gather:{id:'gather', label:'Gatherer'},
+      build:{id:'build', label:'Builder'},
+    };
+
+    const SERVANT_CONSTANTS = {
+      hungerDecayPerMinute:0.035,
+      thirstDecayPerMinute:0.05,
+      shelterDecayPerMinute:0.02,
+      gatherIntervalMinutes:240, // every 4 hours
+      buildSpeedPerMinute:1.6,
+      agePerDay:0.2,
+      hungerThreshold:60,
+      thirstThreshold:60,
+      shelterThreshold:40,
+      maxNeed:100,
+      oldAge:80,
+      baseFoodStorage:20,
+      foodPerSilo:40,
+      waterPerWell:8,
+      hutCapacity:6,
+    };
+
     const UI = {
       modeLabel: document.getElementById('modeLabel'),
       toolLabel: document.getElementById('toolLabel'),
@@ -66,6 +94,8 @@
       dayLabel: document.getElementById('dayLabel'),
       clockLabel: document.getElementById('clockLabel'),
       dayMeter: document.getElementById('dayMeter'),
+      servantList: document.getElementById('servantList'),
+      servantSummary: document.getElementById('servantSummary'),
       saveBtn: document.getElementById('saveBtn'),
       loadBtn: document.getElementById('loadBtn'),
       resetBtn: document.getElementById('resetBtn'),
@@ -119,6 +149,7 @@
       for(let y=-3;y<=3;y++)for(let x=-3;x<=3;x++) if(inBounds(sx+x,sy+y)) setTile(sx+x,sy+y,T.GRASS);
       state.player.x = sx*TILE+TILE/2; state.player.y=sy*TILE+TILE/2;
       log('New world generated. Welcome!');
+      initServants();
     }
 
     function inBounds(x,y){return x>=0&&y>=0&&x<MAP_W&&y<MAP_H}
@@ -130,6 +161,253 @@
     function blob(cx,cy,r,type){
       for(let y=-r;y<=r;y++)for(let x=-r;x<=r;x++){
         if(x*x+y*y<=r*r&&inBounds(cx+x,cy+y)) setTile(cx+x,cy+y,type);
+      }
+    }
+
+    // ===================
+    // Servants & society
+    // ===================
+    function initServants(){
+      state.servants.length = 0;
+      state.nextServantId = 1;
+      spawnServant('Adalyn', 'gather');
+      spawnServant('Brom', 'build');
+      state.waterRations = 0;
+      assignHousing();
+      pruneDeadServants();
+      invalidateServantUI();
+    }
+
+    function spawnServant(name, job='gather', silent=false){
+      const servant = {
+        id: state.nextServantId++,
+        name,
+        job,
+        hunger:SERVANT_CONSTANTS.maxNeed,
+        thirst:SERVANT_CONSTANTS.maxNeed,
+        shelter:SERVANT_CONSTANTS.maxNeed,
+        age:18 + Math.random()*4,
+        taskTimer:0,
+        homeId:null,
+        alive:true,
+        lastJobMessage:0,
+      };
+      state.servants.push(servant);
+      if(!silent) log(`Servant ${servant.name} has joined your settlement.`);
+      invalidateServantUI();
+      return servant;
+    }
+
+    function invalidateServantUI(){ state.servantUiTimer = -1; }
+
+    function builtCount(id){ return state.buildings.filter(b=>b.id===id && b.built).length; }
+
+    function maxFoodStorage(){
+      return SERVANT_CONSTANTS.baseFoodStorage + builtCount('silo')*SERVANT_CONSTANTS.foodPerSilo;
+    }
+
+    function availableWellCapacity(){
+      return builtCount('well') * SERVANT_CONSTANTS.waterPerWell;
+    }
+
+    function hutCapacity(){
+      return builtCount('hut') * SERVANT_CONSTANTS.hutCapacity;
+    }
+
+    function assignHousing(){
+      const huts = state.buildings.filter(b=>b.id==='hut' && b.built);
+      let capacityRemaining = huts.length * SERVANT_CONSTANTS.hutCapacity;
+      const occupantsByHut = new Map();
+      huts.forEach(h=>occupantsByHut.set(h.uid, []));
+
+      // Clear previous assignment
+      state.servants.forEach(s=>{ if(s.alive) s.homeId = null; });
+
+      if(capacityRemaining<=0) return;
+
+      let hutIndex = 0;
+      const aliveServants = state.servants.filter(s=>s.alive);
+      for(const servant of aliveServants){
+        const hut = huts[hutIndex % huts.length];
+        const occupants = occupantsByHut.get(hut.uid);
+        if(occupants.length < SERVANT_CONSTANTS.hutCapacity){
+          occupants.push(servant);
+          servant.homeId = hut.uid;
+          capacityRemaining--;
+          if(occupants.length>=SERVANT_CONSTANTS.hutCapacity) hutIndex++;
+        }
+        if(capacityRemaining<=0) break;
+      }
+    }
+
+    function countAdultPairs(){
+      const huts = state.buildings.filter(b=>b.id==='hut' && b.built);
+      let pairs = 0;
+      huts.forEach(h=>{
+        const occupants = state.servants.filter(s=>s.alive && s.homeId===h.uid && s.age>=18);
+        pairs += Math.floor(occupants.length/2);
+      });
+      return pairs;
+    }
+
+    function handleBreeding(){
+      const availableCapacity = hutCapacity() - state.servants.filter(s=>s.alive && s.homeId).length;
+      if(availableCapacity<=0) return;
+      if(state.inventory.food <= 1) return;
+      if(availableWellCapacity()<=0) return;
+      const pairs = countAdultPairs();
+      if(pairs<=0) return;
+      const chance = Math.min(0.4, 0.1*pairs);
+      if(Math.random() < chance){
+        const babyNames = ['Cora','Eldon','Mira','Soren','Lysa','Tavin','Enid','Hale'];
+        const name = babyNames[Math.floor(Math.random()*babyNames.length)] + ' Jr.';
+        const child = spawnServant(name, 'gather', true);
+        child.age = 1;
+        child.hunger = SERVANT_CONSTANTS.maxNeed*0.8;
+        child.thirst = SERVANT_CONSTANTS.maxNeed*0.8;
+        child.shelter = SERVANT_CONSTANTS.maxNeed;
+        assignHousing();
+        log(`${child.name} was born in the huts.`);
+      }
+    }
+
+    function feedAndWaterServants(){
+      const alive = state.servants.filter(s=>s.alive);
+      state.waterRations = availableWellCapacity();
+      let hungry=0, thirsty=0;
+      for(const servant of alive){
+        if(servant.hunger < SERVANT_CONSTANTS.maxNeed && state.inventory.food>0){
+          state.inventory.food--;
+          servant.hunger = SERVANT_CONSTANTS.maxNeed;
+        }else if(servant.hunger < SERVANT_CONSTANTS.maxNeed){
+          hungry++;
+        }
+        if(servant.thirst < SERVANT_CONSTANTS.maxNeed && state.waterRations>0){
+          state.waterRations--;
+          servant.thirst = SERVANT_CONSTANTS.maxNeed;
+        }else if(servant.thirst < SERVANT_CONSTANTS.maxNeed){
+          thirsty++;
+        }
+        if(servant.homeId){
+          servant.shelter = Math.min(SERVANT_CONSTANTS.maxNeed, servant.shelter+20);
+        }
+      }
+      if(hungry>0) log(`Food stores ran short for ${hungry} servant${hungry>1?'s':''}.`);
+      if(thirsty>0) log(`No water to refresh ${thirsty} servant${thirsty>1?'s':''}. Build wells!`);
+      updateInventoryUI();
+    }
+
+    function updateServants(dt){
+      const minutes = dt*24;
+      const aliveServants = state.servants.filter(s=>s.alive);
+      if(aliveServants.length===0) return;
+
+      for(const servant of aliveServants){
+        servant.age += (minutes/1440)*SERVANT_CONSTANTS.agePerDay;
+        servant.hunger = Math.max(0, servant.hunger - SERVANT_CONSTANTS.hungerDecayPerMinute*minutes);
+        servant.thirst = Math.max(0, servant.thirst - SERVANT_CONSTANTS.thirstDecayPerMinute*minutes);
+        if(!servant.homeId){
+          servant.shelter = Math.max(0, servant.shelter - SERVANT_CONSTANTS.shelterDecayPerMinute*minutes);
+        }else{
+          servant.shelter = Math.min(SERVANT_CONSTANTS.maxNeed, servant.shelter + 0.02*minutes);
+        }
+
+        servant.taskTimer += minutes;
+        if(servant.job==='gather'){
+          const interval = SERVANT_CONSTANTS.gatherIntervalMinutes;
+          while(servant.taskTimer>=interval){
+            servant.taskTimer -= interval;
+            performGatherCycle(servant);
+          }
+        }else if(servant.job==='build'){
+          const rate = SERVANT_CONSTANTS.buildSpeedPerMinute;
+          advanceConstruction(rate*minutes, servant);
+          servant.taskTimer = 0;
+        }
+
+        if(servant.hunger===0){
+          servant.alive = false;
+          log(`${servant.name} has died of starvation.`);
+        }else if(servant.thirst===0){
+          servant.alive = false;
+          log(`${servant.name} has died of dehydration.`);
+        }else if(servant.shelter===0){
+          servant.alive = false;
+          log(`${servant.name} succumbed to the elements without shelter.`);
+        }else if(servant.age>=SERVANT_CONSTANTS.oldAge){
+          servant.alive = false;
+          log(`${servant.name} passed away of old age.`);
+        }
+      }
+
+      invalidateServantUI();
+    }
+
+    function performGatherCycle(servant){
+      let woodGain = 2;
+      let stoneGain = 1;
+      let foodGain = 0;
+      let seedGain = 0;
+      const fields = builtCount('field');
+      if(fields>0){
+        foodGain += Math.max(1, Math.floor(fields/2));
+        seedGain += Math.max(0, Math.floor(fields/3));
+      }
+      if(servant.hunger < SERVANT_CONSTANTS.hungerThreshold) woodGain = Math.max(0, woodGain-1);
+      if(servant.thirst < SERVANT_CONSTANTS.thirstThreshold) stoneGain = Math.max(0, stoneGain-1);
+
+      state.inventory.wood += woodGain;
+      state.inventory.stone += stoneGain;
+      state.inventory.seeds += seedGain;
+      state.inventory.food = Math.min(maxFoodStorage(), state.inventory.food + foodGain);
+      let extras = [];
+      if(foodGain>0) extras.push(`+${foodGain} food`);
+      if(seedGain>0) extras.push(`+${seedGain} seeds`);
+      const extraStr = extras.length?`, ${extras.join(', ')}`:'';
+      log(`${servant.name} gathered resources (+${woodGain} wood, +${stoneGain} stone${extraStr}).`);
+      updateInventoryUI();
+    }
+
+    function advanceConstruction(progress, servant){
+      const site = state.buildings.find(b=>!b.built);
+      if(!site){
+        if(performance.now() - servant.lastJobMessage > 4000){
+          log(`${servant.name} waits for construction orders.`);
+          servant.lastJobMessage = performance.now();
+        }
+        return;
+      }
+      site.progress = (site.progress||0) + progress;
+      if(site.progress>=100){
+        finalizeBuilding(site);
+        log(`${servant.name} completed the ${Buildings.find(b=>b.id===site.id)?.name||site.id}.`);
+      }
+    }
+
+    function finalizeBuilding(site){
+      site.built = true;
+      if(site.id==='road'){
+        for(let oy=0;oy<site.h;oy++) for(let ox=0;ox<site.w;ox++){
+          setTile(site.x+ox, site.y+oy, T.ROAD);
+        }
+      }
+      if(site.id==='field'){
+        for(let oy=0;oy<site.h;oy++) for(let ox=0;ox<site.w;ox++){
+          if(getTile(site.x+ox, site.y+oy)===T.GRASS) setTile(site.x+ox, site.y+oy, T.TILLED);
+        }
+      }
+      site.progress = 100;
+      assignHousing();
+      updateInventoryUI();
+      invalidateServantUI();
+    }
+
+    function pruneDeadServants(){
+      const before = state.servants.length;
+      state.servants = state.servants.filter(s=>s.alive);
+      if(state.servants.length!==before){
+        assignHousing();
+        invalidateServantUI();
       }
     }
 
@@ -196,6 +474,8 @@
     }
 
     function drawBuilding(b){
+      const progress = clamp((b.progress||0)/100, 0, 1);
+      ctx.globalAlpha = 0.6 + 0.4*progress;
       ctx.fillStyle = '#9ca3af';
       switch(b.id){
         case 'hut':
@@ -221,6 +501,14 @@
           ctx.fillStyle = '#6b7280'; ctx.beginPath(); ctx.arc(TILE*0.5,TILE*0.5,TILE*0.4,0,Math.PI*2); ctx.fill();
           ctx.fillStyle = '#1d4ed8'; ctx.beginPath(); ctx.arc(TILE*0.5,TILE*0.5,TILE*0.25,0,Math.PI*2); ctx.fill();
           break;
+      }
+      ctx.globalAlpha = 1;
+      if(!b.built){
+        ctx.fillStyle = 'rgba(15,23,42,0.45)';
+        ctx.fillRect(0,0,b.w*TILE,b.h*TILE);
+        ctx.fillStyle = '#e5e7eb';
+        ctx.font = '12px sans-serif';
+        ctx.fillText(`${Math.round(progress*100)}%`, 4, 14);
       }
     }
 
@@ -255,7 +543,7 @@
       else if(tool==='hand'){
         // harvest crop if grown
         const c = state.crops[idx(tx,ty)];
-        if(c && c.growth>=100){ state.crops[idx(tx,ty)]=null; setTile(tx,ty,T.TILLED); setFeature(tx,ty,null); state.inventory.food+=1; state.inventory.seeds+=Math.random()<0.6?1:0; log('Harvested crop: +food'); }
+        if(c && c.growth>=100){ state.crops[idx(tx,ty)]=null; setTile(tx,ty,T.TILLED); setFeature(tx,ty,null); state.inventory.food = Math.min(maxFoodStorage(), state.inventory.food+1); state.inventory.seeds+=Math.random()<0.6?1:0; log('Harvested crop: +food'); }
       }
       updateInventoryUI();
     });
@@ -294,12 +582,12 @@
       }
       if(!canAfford(proto.cost)){ log('Not enough resources'); return; }
       pay(proto.cost);
-      state.buildings.push({id:proto.id, x:tx, y:ty, w:proto.w, h:proto.h, rot:buildRot});
+      const building = {uid:state.nextBuildingId++, id:proto.id, x:tx, y:ty, w:proto.w, h:proto.h, rot:buildRot, built:false, progress:0};
+      state.buildings.push(building);
       for(let oy=0;oy<proto.h;oy++) for(let ox=0;ox<proto.w;ox++){ setFeature(tx+ox,ty+oy,null); }
-      log(`Placed ${proto.name}`);
-      // if road, paint tiles
-      if(proto.id==='road') setTile(tx,ty,T.ROAD);
+      log(`Planned ${proto.name}; builders will complete it.`);
       updateInventoryUI();
+      invalidateServantUI();
     }
 
     function hasBuildingAt(tx,ty){
@@ -331,9 +619,81 @@
       UI.inv.innerHTML='';
       for(const [k,v] of Object.entries(state.inventory)){
         const card=document.createElement('div'); card.className='card';
-        card.innerHTML=`<div class="row"><div class="title">${k}</div><div>${v}</div></div>`;
+        let displayValue = v;
+        if(k==='food'){
+          displayValue = `${v}/${maxFoodStorage()}`;
+        }
+        card.innerHTML=`<div class="row"><div class="title">${k}</div><div>${displayValue}</div></div>`;
         UI.inv.appendChild(card);
       }
+    }
+
+    function renderServantUI(){
+      if(!UI.servantList) return;
+      UI.servantList.innerHTML='';
+      const alive = state.servants.filter(s=>s.alive);
+      const summaryParts = [];
+      summaryParts.push(`${alive.length} active`);
+      const housed = alive.filter(s=>s.homeId).length;
+      summaryParts.push(`Housing ${housed}/${hutCapacity()}`);
+      summaryParts.push(`Food cap ${maxFoodStorage()}`);
+      const waterCap = availableWellCapacity();
+      summaryParts.push(`Water ${Math.max(0,state.waterRations)}/${waterCap} rations`);
+      UI.servantSummary.textContent = summaryParts.join(' • ');
+
+      if(alive.length===0){
+        const empty=document.createElement('div');
+        empty.className='small';
+        empty.textContent='No active servants.';
+        UI.servantList.appendChild(empty);
+        return;
+      }
+
+      alive.forEach(servant=>{
+        const card=document.createElement('div');
+        card.className='servant-card';
+        const header=document.createElement('div');
+        header.className='servant-header';
+        header.innerHTML=`<span>${servant.name}</span><span class="small">${servant.age.toFixed(1)} yrs</span>`;
+        card.appendChild(header);
+
+        const needs=document.createElement('div');
+        needs.className='servant-needs';
+        needs.appendChild(makeNeedRow('Food', servant.hunger));
+        needs.appendChild(makeNeedRow('Water', servant.thirst));
+        needs.appendChild(makeNeedRow('Shelter', servant.shelter));
+        card.appendChild(needs);
+
+        const jobRow=document.createElement('label');
+        jobRow.className='servant-job';
+        jobRow.textContent='Job';
+        const select=document.createElement('select');
+        for(const job of Object.values(ServantJobs)){
+          const opt=document.createElement('option');
+          opt.value=job.id; opt.textContent=job.label;
+          if(servant.job===job.id) opt.selected=true;
+          select.appendChild(opt);
+        }
+        select.onchange=()=>{ servant.job = select.value; servant.taskTimer=0; invalidateServantUI(); log(`${servant.name} is now a ${ServantJobs[select.value]?.label||select.value}.`); };
+        jobRow.appendChild(select);
+        card.appendChild(jobRow);
+
+        UI.servantList.appendChild(card);
+      });
+    }
+
+    function makeNeedRow(label, value){
+      const wrap=document.createElement('div');
+      wrap.innerHTML=`<div class="row"><div>${label}</div><div>${Math.round(value)}</div></div>`;
+      const bar=document.createElement('div');
+      bar.className='need-bar';
+      const fill=document.createElement('div');
+      fill.style.width=`${clamp(value,0,100)}%`;
+      if(value<40) fill.style.background='#f97316';
+      if(value<20) fill.style.background='#ef4444';
+      bar.appendChild(fill);
+      wrap.appendChild(bar);
+      return wrap;
     }
 
     // Buttons
@@ -375,12 +735,17 @@
 
       // time passes
       state.time += dt*24; // ~1 minute per 2.5 seconds
-      if(state.time>=24*60){ state.time-=24*60; state.day++; UI.dayLabel.textContent=state.day; dailyRespawn(); }
+      if(state.time>=24*60){ state.time-=24*60; state.day++; UI.dayLabel.textContent=state.day; dailyRespawn(); handleNewDay(); }
       UI.clockLabel.textContent = fmtClock(Math.floor(state.time));
       UI.dayMeter.style.width = `${((state.time%1440)/1440)*100}%`;
 
       // player movement
-      const sp = state.player.speed;
+      let sp = state.player.baseSpeed;
+      const tileX = Math.floor(state.player.x / TILE);
+      const tileY = Math.floor(state.player.y / TILE);
+      if(inBounds(tileX,tileY) && getTile(tileX,tileY)===T.ROAD){
+        sp *= 1.35;
+      }
       let dx=(keys['a']||keys['A']||keys['ArrowLeft']?-1:0) + (keys['d']||keys['D']||keys['ArrowRight']?1:0);
       let dy=(keys['w']||keys['W']||keys['ArrowUp']?-1:0) + (keys['s']||keys['S']||keys['ArrowDown']?1:0);
       if(dx||dy){ const len=Math.hypot(dx,dy); dx/=len; dy/=len; state.player.x += dx*sp*dt; state.player.y += dy*sp*dt; }
@@ -395,6 +760,14 @@
       const growthRate = 0.6 * dayLightFactor();
       for(let i=0;i<state.crops.length;i++){
         const c=state.crops[i]; if(!c) continue; c.growth = Math.min(100, c.growth + growthRate);
+      }
+
+      updateServants(dt);
+
+      state.servantUiTimer += dt;
+      if(state.servantUiTimer<0 || state.servantUiTimer>=0.5){
+        renderServantUI();
+        state.servantUiTimer = 0;
       }
 
       draw();
@@ -417,19 +790,72 @@
       }
     }
 
+    function handleNewDay(){
+      assignHousing();
+      feedAndWaterServants();
+      handleBreeding();
+      pruneDeadServants();
+      invalidateServantUI();
+    }
+
     // ===================
     // Save / Load
     // ===================
     function saveGame(){
       const data = {
         day:state.day, time:state.time, world:state.world, crops:state.crops, features:state.features,
-        player:state.player, inventory:state.inventory, buildings:state.buildings
+        player:state.player, inventory:state.inventory, buildings:state.buildings,
+        servants:state.servants, nextServantId:state.nextServantId, nextBuildingId:state.nextBuildingId,
+        waterRations:state.waterRations
       };
       localStorage.setItem('builderSave', JSON.stringify(data));
     }
     function loadGame(){
       const raw=localStorage.getItem('builderSave'); if(!raw) return false; const d=JSON.parse(raw);
-      Object.assign(state,{day:d.day,time:d.time,player:d.player,inventory:d.inventory,buildings:d.buildings});
+      state.day = d.day||1;
+      state.time = d.time||6*60;
+      state.player = {...(d.player||{})};
+      if(typeof state.player.baseSpeed!=='number'){
+        state.player.baseSpeed = state.player.speed||140;
+      }
+      state.inventory = {...(d.inventory||{wood:0,stone:0,seeds:0,food:0})};
+
+      state.nextBuildingId = d.nextBuildingId || 1;
+      state.buildings = Array.isArray(d.buildings)? d.buildings.map(b=>{
+        const copy = {...b};
+        if(!copy.uid) copy.uid = state.nextBuildingId++;
+        if(typeof copy.built!=='boolean') copy.built = true;
+        copy.progress = copy.built ? 100 : (copy.progress||0);
+        return copy;
+      }) : [];
+
+      state.inventory.food = Math.min(maxFoodStorage(), state.inventory.food||0);
+
+      if(Array.isArray(d.servants)){
+        state.servants = d.servants.map(s=>({
+          id: s.id,
+          name: s.name||'Helper',
+          job: s.job||'gather',
+          hunger: typeof s.hunger==='number'?s.hunger:SERVANT_CONSTANTS.maxNeed,
+          thirst: typeof s.thirst==='number'?s.thirst:SERVANT_CONSTANTS.maxNeed,
+          shelter: typeof s.shelter==='number'?s.shelter:SERVANT_CONSTANTS.maxNeed,
+          age: typeof s.age==='number'?s.age:20,
+          taskTimer: s.taskTimer||0,
+          homeId: s.homeId||null,
+          alive: s.alive!==false,
+          lastJobMessage:0,
+        }));
+        state.nextServantId = d.nextServantId || (Math.max(0,...state.servants.map(s=>s.id||0))+1);
+      }else{
+        initServants();
+      }
+
+      const savedWater = typeof d.waterRations==='number'?d.waterRations:availableWellCapacity();
+      state.waterRations = clamp(savedWater, 0, availableWellCapacity());
+
+      pruneDeadServants();
+      assignHousing();
+      invalidateServantUI();
       state.world = new Array(MAP_W*MAP_H).fill(T.GRASS);
       if(d.world && d.world.length===MAP_W*MAP_H) state.world = d.world;
       state.crops = new Array(MAP_W*MAP_H).fill(null);
@@ -446,7 +872,7 @@
           return null;
         });
       }
-      updateInventoryUI(); centerCamera();
+      updateInventoryUI(); renderServantUI(); centerCamera();
       return true;
     }
 
@@ -457,6 +883,7 @@
       genWorld( (Date.now()>>>0) & 0xfffffff );
       renderBuildMenu();
       updateInventoryUI();
+      renderServantUI();
       UI.toolLabel.textContent = Tools[state.toolIndex].name;
       UI.modeLabel.textContent = 'Gather';
       centerCamera();
