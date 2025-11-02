@@ -170,8 +170,13 @@
       centerBtn: document.getElementById('centerBtn'),
     };
 
+    const LOG_LIMIT = 80;
+    const logEntries = [];
+
     function log(msg){
-      UI.log.textContent = `[Day ${state.day} ${fmtClock(state.time)}] ${msg}\n` + UI.log.textContent;
+      logEntries.unshift(`[Day ${state.day} ${fmtClock(state.time)}] ${msg}`);
+      if(logEntries.length>LOG_LIMIT) logEntries.length = LOG_LIMIT;
+      UI.log.textContent = logEntries.join('\n');
     }
 
     function fmtClock(mins){
@@ -184,8 +189,10 @@
     function genWorld(seed=12345){
       const rnd = mulberry32(seed);
       state.world = new Array(MAP_W*MAP_H).fill(T.GRASS);
-      state.features = new Array(MAP_W*MAP_H).fill(0); // respawn timers etc.
+      state.features = new Array(MAP_W*MAP_H).fill(null); // respawn timers etc.
       state.crops = new Array(MAP_W*MAP_H).fill(null);
+      logEntries.length = 0;
+      UI.log.textContent = '';
 
       // Simple blobs for water
       for(let i=0;i<28;i++){
@@ -214,6 +221,8 @@
     function idx(x,y){return y*MAP_W+x}
     function getTile(x,y){return state.world[idx(x,y)]}
     function setTile(x,y,v){state.world[idx(x,y)]=v}
+    function setFeature(x,y,data){state.features[idx(x,y)] = data ? {...data} : null;}
+    function getFeature(x,y){return state.features[idx(x,y)];}
     function blob(cx,cy,r,type){
       for(let y=-r;y<=r;y++)for(let x=-r;x<=r;x++){
         if(x*x+y*y<=r*r&&inBounds(cx+x,cy+y)) setTile(cx+x,cy+y,type);
@@ -232,7 +241,6 @@
       ctx.translate(-cam.x, -cam.y);
 
       // Sky color changes with day time
-      const tNorm = (state.time%1440)/1440; // 0..1
       const sky = lerpColor([10,15,26],[60,80,120], dayLightFactor());
       canvas.style.background = `rgb(${sky[0]},${sky[1]},${sky[2]})`;
 
@@ -336,14 +344,14 @@
       // gather / farming
       const tool = Tools[state.toolIndex].id;
       const cur = getTile(tx,ty);
-      if(tool==='axe' && cur===T.TREE){ setTile(tx,ty,T.GRASS); state.inventory.wood+=2+Math.floor(Math.random()*2); state.features[idx(tx,ty)] = RESPAWN_DAYS.TREE; log('Chopped tree: +wood'); }
-      else if(tool==='pick' && cur===T.ROCK){ setTile(tx,ty,T.GRASS); state.inventory.stone+=1+Math.floor(Math.random()*3); state.features[idx(tx,ty)] = RESPAWN_DAYS.ROCK; log('Mined rock: +stone'); }
-      else if(tool==='hoe' && cur===T.GRASS){ setTile(tx,ty,T.TILLED); log('Tilled soil'); }
+      if(tool==='axe' && cur===T.TREE){ setTile(tx,ty,T.GRASS); state.inventory.wood+=2+Math.floor(Math.random()*2); setFeature(tx,ty,{timer:RESPAWN_DAYS.TREE,type:T.TREE}); log('Chopped tree: +wood'); }
+      else if(tool==='pick' && cur===T.ROCK){ setTile(tx,ty,T.GRASS); state.inventory.stone+=1+Math.floor(Math.random()*3); setFeature(tx,ty,{timer:RESPAWN_DAYS.ROCK,type:T.ROCK}); log('Mined rock: +stone'); }
+      else if(tool==='hoe' && cur===T.GRASS){ setTile(tx,ty,T.TILLED); setFeature(tx,ty,null); log('Tilled soil'); }
       else if(tool==='seeder' && cur===T.TILLED){ if(state.inventory.seeds>0){ state.inventory.seeds--; plantCrop(tx,ty); log('Planted a seed'); } else log('No seeds'); }
       else if(tool==='hand'){
         // harvest crop if grown
         const c = state.crops[idx(tx,ty)];
-        if(c && c.growth>=100){ state.crops[idx(tx,ty)]=null; setTile(tx,ty,T.TILLED); state.inventory.food+=1; state.inventory.seeds+=Math.random()<0.6?1:0; log('Harvested crop: +food'); }
+        if(c && c.growth>=100){ state.crops[idx(tx,ty)]=null; setTile(tx,ty,T.TILLED); setFeature(tx,ty,null); state.inventory.food+=1; state.inventory.seeds+=Math.random()<0.6?1:0; log('Harvested crop: +food'); }
       }
       updateInventoryUI();
     });
@@ -383,6 +391,7 @@
       if(!canAfford(proto.cost)){ log('Not enough resources'); return; }
       pay(proto.cost);
       state.buildings.push({id:proto.id, x:tx, y:ty, w:proto.w, h:proto.h, rot:buildRot});
+      for(let oy=0;oy<proto.h;oy++) for(let ox=0;ox<proto.w;ox++){ setFeature(tx+ox,ty+oy,null); }
       log(`Placed ${proto.name}`);
       // if road, paint tiles
       if(proto.id==='road') setTile(tx,ty,T.ROAD);
@@ -461,6 +470,8 @@
       let dx=(keys['a']||keys['A']||keys['ArrowLeft']?-1:0) + (keys['d']||keys['D']||keys['ArrowRight']?1:0);
       let dy=(keys['w']||keys['W']||keys['ArrowUp']?-1:0) + (keys['s']||keys['S']||keys['ArrowDown']?1:0);
       if(dx||dy){ const len=Math.hypot(dx,dy); dx/=len; dy/=len; state.player.x += dx*sp*dt; state.player.y += dy*sp*dt; }
+      state.player.x = clamp(state.player.x, TILE/2, MAP_W*TILE - TILE/2);
+      state.player.y = clamp(state.player.y, TILE/2, MAP_H*TILE - TILE/2);
 
       // camera follows
       cam.x = lerp(cam.x, state.player.x, 0.12);
@@ -479,11 +490,15 @@
     function dailyRespawn(){
       for(let y=0;y<MAP_H;y++){
         for(let x=0;x<MAP_W;x++){
-          const id = idx(x,y);
-          if(state.features[id]>0){ state.features[id]--; if(state.features[id]===0){
-            // respawn tree/rock on grass
-            if(Math.random()<0.6) setTile(x,y,T.TREE); else setTile(x,y,T.ROCK);
-          }}
+          if(hasBuildingAt(x,y)) continue;
+          const feat = getFeature(x,y);
+          if(feat && feat.timer>0){
+            feat.timer--;
+            if(feat.timer<=0){
+              setTile(x,y,feat.type);
+              setFeature(x,y,null);
+            }
+          }
         }
       }
     }
@@ -505,8 +520,18 @@
       if(d.world && d.world.length===MAP_W*MAP_H) state.world = d.world;
       state.crops = new Array(MAP_W*MAP_H).fill(null);
       if(d.crops && d.crops.length===MAP_W*MAP_H) state.crops = d.crops;
-      state.features = new Array(MAP_W*MAP_H).fill(0);
-      if(d.features && d.features.length===MAP_W*MAP_H) state.features = d.features;
+      state.features = new Array(MAP_W*MAP_H).fill(null);
+      if(d.features && d.features.length===MAP_W*MAP_H){
+        state.features = d.features.map(f=>{
+          if(!f) return null;
+          if(typeof f==='object' && 'timer' in f && 'type' in f) return {...f};
+          if(typeof f==='number'){
+            const type = f>=RESPAWN_DAYS.ROCK ? T.ROCK : T.TREE;
+            return {timer:f,type};
+          }
+          return null;
+        });
+      }
       updateInventoryUI(); centerCamera();
       return true;
     }
