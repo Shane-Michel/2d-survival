@@ -44,7 +44,7 @@
       nextServantId:1,
       waterRations:0,
       servantUiTimer:0,
-      paused: false,
+      paused:false,
       last: performance.now(),
     };
 
@@ -113,6 +113,36 @@
       guideBtn: document.getElementById('guideBtn'),
       guideContent: document.getElementById('guideContent'),
     };
+// === Pause / Resume Controls ===
+(function(){
+  const wrap = document.createElement('div');
+  wrap.style.position='fixed'; wrap.style.top='12px'; wrap.style.right='12px';
+  wrap.style.display='flex'; wrap.style.gap='8px'; wrap.style.zIndex='9999';
+  const btn = document.createElement('button'); btn.id='pauseBtn'; btn.type='button';
+  btn.textContent='Pause';
+  btn.style.padding='6px 12px'; btn.style.border='1px solid #444'; btn.style.borderRadius='6px';
+  btn.style.background='#222'; btn.style.color='#fff'; btn.style.cursor='pointer';
+  const dot = document.createElement('span'); dot.id='pauseDot';
+  dot.style.width='10px'; dot.style.height='10px'; dot.style.borderRadius='50%'; dot.style.alignSelf='center';
+  dot.style.display='inline-block'; dot.style.background='#2ecc71'; // green running
+  wrap.appendChild(btn); wrap.appendChild(dot); document.body.appendChild(wrap);
+
+  function setPaused(next){
+    state.paused = !!next;
+    btn.textContent = state.paused ? 'Resume' : 'Pause';
+    dot.style.background = state.paused ? '#e74c3c' : '#2ecc71';
+  }
+  function togglePause(){ setPaused(!state.paused); }
+
+  btn.addEventListener('click', togglePause);
+  window.addEventListener('keydown', (e)=>{
+    if((e.key||'').toLowerCase()==='p') togglePause();
+  });
+
+  // expose for debugging
+  window.setPaused = setPaused;
+  window.togglePause = togglePause;
+})();
 
     const LOG_LIMIT = 80;
     const logEntries = [];
@@ -905,7 +935,14 @@
     // Input & camera
     // ===================
     const keys={};
-    window.addEventListener('keydown',e=>{keys[e.key]=true; if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();});
+    window.addEventListener('keydown', (e)=>{
+      const tag = (e.target && e.target.tagName) || '';
+      const isFormEl = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable);
+      keys[e.key] = true;
+      if (!state.paused && !isFormEl && ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) {
+        e.preventDefault();
+      }
+    });
     window.addEventListener('keyup',e=>{keys[e.key]=false});
     canvas.addEventListener('wheel',e=>{ zoom = clamp(zoom + (e.deltaY>0?-0.05:0.05), 0.6, 2.2); });
 
@@ -1152,6 +1189,8 @@
     function tick(){
       const now=performance.now();
       const dt=(now-last)/1000; last=now;
+      if(state.paused){ requestAnimationFrame(tick); return; }
+
 
       // time passes
       state.time += dt*24; // ~1 minute per 2.5 seconds

@@ -14,6 +14,11 @@
         <div class="topbar">
           <div class="chip">Mode: <span id="modeLabel">Gather</span></div>
           <div class="chip">Tool: <span id="toolLabel">Hand</span></div>
+          <!-- Pause / Resume control -->
+          <div class="game-controls">
+            <button id="pauseBtn" type="button">Pause</button>
+            <span id="pauseDot" aria-hidden="true"></span>
+          </div>
         </div>
         <div class="rightbar">
           <button class="btn" id="centerBtn" title="Center on player"><span>Center</span><span class="kbd">C</span></button>
@@ -79,7 +84,7 @@
     </aside>
   </div>
 
-    <script src="script.js"></script>
+    <script src="script_paused.js"></script>
 
 </body>
 </html>
